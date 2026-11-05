@@ -1,0 +1,4 @@
+Total Cycles: 15
+Instructions Executed: 11
+CPI: 1.363636
+IPC: 0.733333
