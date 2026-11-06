@@ -25,6 +25,88 @@ HALT_INSTR = 0xFFFFFFFF
 MASK32 = 0xFFFFFFFF
 MAX_CYCLES = 1000000
 
+# RISC-V instruction opcodes
+OP_RTYPE = 0x33
+OP_ITYPE = 0x13
+OP_LOAD = 0x03
+OP_STORE = 0x23
+OP_BRANCH = 0x63
+OP_JAL = 0x6F
+OP_JALR = 0x67
+
+def sign_extend(value, bits):
+    # Convert a signed binary value into a python integer
+    sign_bit = 1 << (bits - 1)
+    return (value ^ sign_bit) - sign_bit
+
+def decode_instruction(instr):
+    # Extract the fields of a 32-bit RISC-V instruction
+
+    opcode = instr & 0x7F
+    rd = (instr >> 7) & 0x1F
+    funct3 = (instr >> 12) & 0x07
+    rs1 = (instr >> 15) & 0x1F
+    rs2 = (instr >> 20) & 0x1F
+    funct7 = (instr >> 25) & 0x7F
+
+    # I-type immediate
+    imm_i = sign_extend(instr >> 20, 12)
+
+    # S-type immediate (stores)
+    imm_s = ((instr >> 25) << 5) | ((instr >> 7) & 0x1F)
+    imm_s = sign_extend(imm_s, 12)
+
+    # B-type immediate (branches)
+    imm_b = (
+        ((instr >> 31) & 1) << 12
+        | ((instr >> 7) & 1) << 11
+        | ((instr >> 25) & 0x3F) << 5
+        | ((instr >> 8) & 0x0F) << 1
+    )
+    imm_b = sign_extend(imm_b, 13)
+
+    # J-type immediate (JAL)
+    imm_j = (
+        ((instr >> 31) & 1) << 20
+        | ((instr >> 12) & 0xFF) << 12
+        | ((instr >> 20) & 1) << 11
+        | ((instr >> 21) & 0x3FF) << 1
+    )
+    imm_j = sign_extend(imm_j, 21)
+
+    return {
+        "opcode": opcode,
+        "rd": rd,
+        "rs1": rs1,
+        "rs2": rs2,
+        "funct3": funct3,
+        "funct7": funct7,
+        "imm_i": imm_i,
+        "imm_s": imm_s,
+        "imm_b": imm_b,
+        "imm_j": imm_j,
+    }
+
+def alu(operation, a, b):
+    # Perform a 32-bit arithmetic or logical operation
+
+    a = a & MASK32
+    b = b & MASK32
+
+    if operation == "ADD":
+        result = a + b
+    elif operation == "SUB":
+        result = a - b
+    elif operation == "AND":
+        result = a & b
+    elif operation == "OR":
+        result = a | b
+    elif operation == "XOR":
+        result = a ^ b
+    else:
+        raise ValueError(f"Unsupported ALU operation: {operation}")
+
+    return result & MASK32
 
 def _stage_pc(stage):
     if stage.get("nop", True):
@@ -47,7 +129,20 @@ class InsMem(object):
         if ReadAddress < 0 or ReadAddress + 4 > len(self.bytes):
             return 0
         # TODO: Return the 32-bit instruction at byte address ReadAddress.
-        raise NotImplementedError("InsMem.readInstr")
+        # raise NotImplementedError("InsMem.readInstr")
+
+        """ Turns 4 bytes
+        00000000
+        00000001
+        00000000
+        10010011
+
+        into one 32-bit instruction
+        00000000000100000000000010010011 
+        """
+
+        instruction = "".join(self.bytes[ReadAddress:ReadAddress + 4])
+        return int(instruction, 2)
 
 
 class DataMem(object):
@@ -63,7 +158,20 @@ class DataMem(object):
         Bytes that fall outside the memory read as 0.
         """
         # TODO: Return the 32-bit word at byte address ReadAddress.
-        raise NotImplementedError("DataMem.readDataMem")
+        # raise NotImplementedError("DataMem.readDataMem")
+
+        """ Read 4 bytes from memory
+        << 8 shifts existing value left by 8 bits
+        | byte combines the value with the next byte
+        """
+
+        value = 0
+        for i in range(4):
+            address = ReadAddress + i
+            byte = self.image[address] if 0 <= address < MEM_SIZE else 0
+            value = (value << 8) | byte
+
+        return value
 
     def writeDataMem(self, Address, WriteData):
         """Write the low 32 bits of ``WriteData`` at byte address ``Address``.
@@ -71,7 +179,18 @@ class DataMem(object):
         Bytes that fall outside the memory are silently dropped.
         """
         # TODO: Store WriteData at byte address Address.
-        raise NotImplementedError("DataMem.writeDataMem")
+        # raise NotImplementedError("DataMem.writeDataMem")
+
+        # Breaking 32-bit number into four separate bytes
+        # & 0xFF extracts one byte at a time
+
+        WriteData = WriteData & MASK32
+
+        for i in range(4):
+            address = Address + i
+            if 0 <= address < MEM_SIZE:
+                shift = 8 * (3 - i)
+                self.image[address] = (WriteData >> shift) & 0xFF
 
     def outputDataMem(self):
         with open(os.path.join(self.io_dir, "DMEMResult.txt"), "w") as fh:
@@ -87,7 +206,9 @@ class RegisterFile(object):
     def readRF(self, Reg_addr):
         """Return the 32-bit value of register ``Reg_addr``."""
         # TODO: Return the value held in register Reg_addr.
-        raise NotImplementedError("RegisterFile.readRF")
+        # raise NotImplementedError("RegisterFile.readRF")
+
+        return self.regs[Reg_addr]
 
     def writeRF(self, Reg_addr, Wrt_reg_data):
         """Write the low 32 bits of ``Wrt_reg_data`` to register ``Reg_addr``.
@@ -95,7 +216,10 @@ class RegisterFile(object):
         x0 is hardwired to zero, so writes to it are discarded.
         """
         # TODO: Store Wrt_reg_data in register Reg_addr. Writes to x0 are ignored.
-        raise NotImplementedError("RegisterFile.writeRF")
+        # raise NotImplementedError("RegisterFile.writeRF")
+
+        if Reg_addr != 0:
+            self.regs[Reg_addr] = Wrt_reg_data & MASK32
 
     def outputRF(self):
         with open(os.path.join(self.io_dir, "RFResult.txt"), "w") as fh:
@@ -220,7 +344,292 @@ class FiveStageCore(Core):
         # --------------------- EX stage ---------------------
         # --------------------- ID stage ---------------------
         # --------------------- IF stage ---------------------
-        raise NotImplementedError("FiveStageCore.step")
+        # raise NotImplementedError("FiveStageCore.step")
+
+        # Create a fresh state for the next clock cycle
+        self.nextState = State()
+
+        # Start with empty pipeline stages
+        self.nextState.IF = {"nop": True, "PC": 0}
+        self.nextState.ID = {"nop": True, "PC": 0}
+        self.nextState.EX = {"nop": True, "PC": 0}
+        self.nextState.MEM = {"nop": True, "PC": 0}
+        self.nextState.WB = {"nop": True, "PC": 0}
+
+        # This ensures every stage starts as an empty bubble until an actual instruction moves into it
+
+        # --------------------- WB stage ---------------------
+
+        if not self.state.WB["nop"]:
+            wb = self.state.WB
+            if wb.get("reg_write", False):
+                self.myRF.writeRF(
+                    wb["rd"],
+                    wb["write_data"]
+                )
+            self.instructions_executed += 1
+
+        # --------------------- MEM stage --------------------
+
+        if not self.state.MEM["nop"]:
+            mem = self.state.MEM
+
+            write_data = mem["alu_result"]
+            opcode = mem["opcode"]
+
+            # Load Word
+            if opcode == OP_LOAD:
+                write_data = self.dmem.readDataMem(
+                    mem["alu_result"]
+                )
+
+            # Store Word
+            if opcode == OP_STORE:
+                self.dmem.writeDataMem(
+                    mem["alu_result"],
+                    mem["store_data"]
+                )
+
+            # Forward instruction information to WB
+            self.nextState.WB = {
+                "nop": False,
+                "PC": mem["PC"],
+                "opcode": opcode,
+                "rd": mem["rd"],
+                "reg_write": mem["reg_write"],
+                "write_data": write_data & MASK32,
+            }
+
+        # --------------------- EX stage ---------------------
+
+        if not self.state.EX["nop"]:
+            ex = self.state.EX
+
+            opcode = ex["opcode"]
+            rd = ex["rd"]
+            rs1 = ex["rs1"]
+            rs2 = ex["rs2"]
+            funct3 = ex["funct3"]
+            funct7 = ex["funct7"]
+
+            a = ex["rs1_val"]
+            b = ex["rs2_val"]
+
+            # Forward from MEM (newest result first)
+            mem = self.state.MEM
+
+            if not mem["nop"] and mem.get("reg_write", False):
+                if mem["rd"] != 0 and mem["opcode"] != OP_LOAD:
+                    if mem["rd"] == rs1:
+                        a = mem["alu_result"]
+
+                    if mem["rd"] == rs2:
+                        b = mem["alu_result"]
+
+            # Forward from WB if MEM does not have a newer value
+            wb = self.state.WB
+
+            if not wb["nop"] and wb.get("reg_write", False):
+                if wb["rd"] != 0:
+                    mem_writes = (
+                        not mem["nop"]
+                        and mem.get("reg_write", False)
+                        and mem["rd"] != 0
+                        and mem["opcode"] != OP_LOAD
+                    )
+
+                    if wb["rd"] == rs1:
+                        if not (mem_writes and mem["rd"] == rs1):
+                            a = wb["write_data"]
+
+                    if wb["rd"] == rs2:
+                        if not (mem_writes and mem["rd"] == rs2):
+                            b = wb["write_data"]
+
+            # Execute instruction
+            result = 0
+
+            if opcode == OP_RTYPE:
+                if funct3 == 0:
+                    if funct7 == 0x20:
+                        result = alu("SUB", a, b)
+                    else:
+                        result = alu("ADD", a, b)
+                elif funct3 == 7:
+                    result = alu("AND", a, b)
+                elif funct3 == 6:
+                    result = alu("OR", a, b)
+                elif funct3 == 4:
+                    result = alu("XOR", a, b)
+            elif opcode == OP_ITYPE:
+                imm = ex["imm_i"]
+
+                if funct3 == 0:
+                    result = alu("ADD", a, imm)
+                elif funct3 == 7:
+                    result = alu("AND", a, imm)
+                elif funct3 == 6:
+                    result = alu("OR", a, imm)
+                elif funct3 == 4:
+                    result = alu("XOR", a, imm)
+            elif opcode == OP_LOAD:
+                result = alu("ADD", a, ex["imm_i"])
+            elif opcode == OP_STORE:
+                result = alu("ADD", a, ex["imm_s"])
+            elif opcode in (OP_JAL, OP_JALR):
+                result = (ex["PC"] + 4) & MASK32
+
+            # Pass result to the MEM stage
+            self.nextState.MEM = {
+                "nop": False,
+                "PC": ex["PC"],
+                "opcode": opcode,
+                "rd": rd,
+                "reg_write": ex["reg_write"],
+                "alu_result": result & MASK32,
+                "store_data": b & MASK32,
+            }
+
+        # --------------------- ID stage ---------------------
+
+        stalled = False
+        redirected = False
+        redirect_pc = 0
+
+        if not self.state.ID["nop"]:
+            ide = self.state.ID
+
+            instr = ide["instr"]
+            d = decode_instruction(instr)
+
+            opcode = d["opcode"]
+            rs1 = d["rs1"]
+            rs2 = d["rs2"]
+            rd = d["rd"]
+
+            uses_rs1 = opcode in (
+                OP_RTYPE, OP_ITYPE, OP_LOAD,
+                OP_STORE, OP_BRANCH, OP_JALR
+            )
+
+            uses_rs2 = opcode in (
+                OP_RTYPE, OP_STORE, OP_BRANCH
+            )
+
+            ex = self.state.EX
+            if (
+                not ex["nop"]
+                and ex["opcode"] == OP_LOAD
+                and ex["rd"] != 0
+                and (
+                    (uses_rs1 and ex["rd"] == rs1)
+                    or (uses_rs2 and ex["rd"] == rs2)
+                )
+            ):
+                stalled = True
+                self.nextState.ID = ide.copy()
+                self.nextState.IF = self.state.IF.copy()
+
+            else:
+                a = self.myRF.readRF(rs1) if uses_rs1 else 0
+                b = self.myRF.readRF(rs2) if uses_rs2 else 0
+
+                # Forward from MEM into ID
+                mem = self.state.MEM
+
+                if not mem["nop"] and mem.get("reg_write", False):
+                    if mem["rd"] != 0:
+                        value = self.nextState.WB["write_data"]
+
+                        if uses_rs1 and mem["rd"] == rs1:
+                            a = value
+
+                        if uses_rs2 and mem["rd"] == rs2:
+                            b = value
+
+                # Forward from EX into ID
+                ex = self.state.EX
+
+                if not ex["nop"] and ex.get("reg_write", False):
+                    if ex["rd"] != 0 and ex["opcode"] != OP_LOAD:
+                        value = self.nextState.MEM["alu_result"]
+
+                        if uses_rs1 and ex["rd"] == rs1:
+                            a = value
+
+                        if uses_rs2 and ex["rd"] == rs2:
+                            b = value
+
+                reg_write = opcode in (
+                    OP_RTYPE, OP_ITYPE, OP_LOAD,
+                    OP_JAL, OP_JALR
+                )
+
+                self.nextState.EX = {
+                    "nop": False,
+                    "PC": ide["PC"],
+                    "opcode": opcode,
+                    "rd": rd,
+                    "rs1": rs1,
+                    "rs2": rs2,
+                    "funct3": d["funct3"],
+                    "funct7": d["funct7"],
+                    "imm_i": d["imm_i"],
+                    "imm_s": d["imm_s"],
+                    "rs1_val": a,
+                    "rs2_val": b,
+                    "reg_write": reg_write,
+                }
+
+                # Branches
+                if opcode == OP_BRANCH:
+                    if d["funct3"] == 0:
+                        taken = (a == b) # BEQ
+                    else:
+                        taken = (a != b) # BNE
+
+                    redirected = True
+
+                    if taken:
+                        redirect_pc = (ide["PC"] + d["imm_b"]) & MASK32
+                    else:
+                        redirect_pc = self.state.IF["PC"]
+
+                # Jump and Link
+                elif opcode == OP_JAL:
+                    redirected = True
+                    redirect_pc = (ide["PC"] + d["imm_j"]) & MASK32
+
+                # Jump and Link Register
+                elif opcode == OP_JALR:
+                    redirected = True
+                    redirect_pc = (a + d["imm_i"]) & MASK32
+                    redirect_pc &= ~1
+
+        # --------------------- IF stage ---------------------
+
+        if not stalled and redirected:
+            self.nextState.IF = {
+                "nop": False,
+                "PC": redirect_pc
+            }
+        elif not stalled and not self.state.IF["nop"]:
+            pc = self.state.IF["PC"]
+            instr = self.imem.readInstr(pc)
+
+            if instr != HALT_INSTR:
+                self.nextState.ID = {
+                    "nop": False,
+                    "PC": pc,
+                    "instr": instr,
+                }
+
+                self.nextState.IF = {
+                    "nop": False,
+                    "PC": (pc + 4) & MASK32,
+                }
+
+        self.state = self.nextState
 
 
 def main(argv=None):
